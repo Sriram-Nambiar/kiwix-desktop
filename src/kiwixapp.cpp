@@ -197,10 +197,10 @@ void KiwixApp::restoreTabs()
         else
           openUrl(QUrl(zimUrl));
       }
-    }
 
-    /* Restore current tab index. */
-    getTabWidget()->setCurrentIndex(mp_session->value("currentTabIndex", 0).toInt());
+      /* Restore current tab index. */
+      getTabWidget()->setCurrentIndex(mp_session->value("currentTabIndex", 0).toInt());
+    }
 }
 
 KiwixApp *KiwixApp::instance()
@@ -518,6 +518,7 @@ void KiwixApp::postInit() {
     };
 
     connect(&m_settingsManager, &SettingsManager::themeChanged, this, applyTheme);
+    connect(&m_settingsManager, &SettingsManager::themeChanged, getTabWidget(), &TabBar::reloadAllWebViews);
     applyTheme(m_settingsManager.getTheme());
 #endif
 }
