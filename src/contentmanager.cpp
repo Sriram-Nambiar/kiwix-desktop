@@ -21,7 +21,7 @@
 #include <QtConcurrent/QtConcurrentRun>
 #include "contentmanagerheader.h"
 #include <QDesktopServices>
-
+#include <algorithm>
 #ifndef QT_NO_DEBUG
 #define DBGOUT(X) qDebug().nospace() << "DBG: " << X
 #else
@@ -344,7 +344,7 @@ QVariant getBookAttribute(const kiwix::Book& b, const QString& a)
     if ( a == "title" )       return QString::fromStdString(b.getTitle());
     if ( a == "description" ) return QString::fromStdString(b.getDescription());
     if ( a == "date" )        return QString::fromStdString(b.getDate());
-    if ( a == "url" )         return QString::fromStdString(b.getUrl());
+    if ( a == "url" )         return QString::fromStdString(b.getUrl(kiwix::Book::AcquisitionLinkKind::DIRECT));
     if ( a == "name" )        return QString::fromStdString(b.getName());
     if ( a == "favicon")      return getFaviconDataOrUrl(b);
     if ( a == "size" )        return QString::number(b.getSize());
@@ -415,7 +415,7 @@ ContentManager::BookState ContentManager::getBookState(QString bookId)
     try {
         QMutexLocker locker(&remoteLibraryLocker);
         const kiwix::Book& b = mp_remoteLibrary->getBookById(bookId.toStdString());
-        return !b.getUrl().empty()
+        return !b.getUrl(kiwix::Book::AcquisitionLinkKind::DIRECT).empty()
              ? BookState::AVAILABLE_ONLINE
              : BookState::METADATA_ONLY;
     } catch (...) {}
@@ -455,7 +455,7 @@ void ContentManager::openBookPreview(const QString &id)
     try {
         QMutexLocker locker(&remoteLibraryLocker);
         const std::string &downloadUrl =
-            mp_remoteLibrary->getBookById(id.toStdString()).getUrl();
+            mp_remoteLibrary->getBookById(id.toStdString()).getUrl(kiwix::Book::AcquisitionLinkKind::DIRECT);
         locker.unlock();
 
         /* Extract the Zim name from the book's download URL */
@@ -501,7 +501,7 @@ void ContentManager::downloadCompleted(QString bookId, QString path)
     bCopy.setDownloadId("");
     bCopy.setPathValid(true);
     // removing book url so that download link in kiwix-serve is not displayed.
-    bCopy.setUrl("");
+    bCopy.setUrl(kiwix::Book::AcquisitionLinkKind::DIRECT, "");
     mp_library->getKiwixLibrary()->addOrUpdateBook(bCopy);
     mp_library->save();
     mp_library->bookmarksChanged();
@@ -825,25 +825,31 @@ QStringList ContentManager::getBookIds()
     if (m_categoryFilter != "")
         filter.category(m_categoryFilter.toStdString());
 
+    QStringList list;
     if (m_local) {
         filter.local(true);
         filter.valid(true);
-        return mp_library->listBookIds(filter, m_sortBy, m_sortOrderAsc);
+        list = mp_library->listBookIds(filter, m_sortBy, m_sortOrderAsc);
     } else {
         filter.remote(true);
         QMutexLocker locker(&remoteLibraryLocker);
         auto bookIds = mp_remoteLibrary->filter(filter);
         mp_remoteLibrary->sort(bookIds, m_sortBy, m_sortOrderAsc);
-        QStringList list;
         for(auto& bookId:bookIds) {
             list.append(QString::fromStdString(bookId));
         }
-        return list;
     }
+
+    if (!m_customSort.isEmpty()) {
+        applyCustomSort(list);
+    }
+
+    return list;
 }
 
 void ContentManager::setSortBy(const QString& sortBy, const bool sortOrderAsc)
 {
+    m_customSort = "";
     if (sortBy == "unsorted") {
         m_sortBy = kiwix::UNSORTED;
     } else if (sortBy == "title") {
@@ -852,9 +858,38 @@ void ContentManager::setSortBy(const QString& sortBy, const bool sortOrderAsc)
         m_sortBy = kiwix::SIZE;
     } else if (sortBy == "date") {
         m_sortBy = kiwix::DATE;
+    } else if (sortBy == "content_type" || sortBy == "status") {
+        m_sortBy = kiwix::UNSORTED;
+        m_customSort = sortBy;
     }
     m_sortOrderAsc = sortOrderAsc;
     emit(booksChanged());
+}
+
+void ContentManager::applyCustomSort(QStringList& list)
+{
+    if (m_customSort == "status") {
+        auto getPriority = [this](const QString& id) -> int {
+            switch (this->getBookState(id)) {
+                case BookState::AVAILABLE_LOCALLY_AND_HEALTHY: return 0;
+                case BookState::DOWNLOADING:
+                case BookState::DOWNLOAD_PAUSED:
+                case BookState::DOWNLOAD_ERROR:                return 1;
+                default:                                       return 2;
+            }
+        };
+        std::stable_sort(list.begin(), list.end(), [&](const QString& a, const QString& b) {
+            const int pA = getPriority(a);
+            const int pB = getPriority(b);
+            return m_sortOrderAsc ? (pA < pB) : (pA > pB);
+        });
+    } else if (m_customSort == "content_type") {
+        std::stable_sort(list.begin(), list.end(), [this](const QString& a, const QString& b) {
+            const QString tagA = this->getBookInfos(a, {"tags"})["tags"].toString();
+            const QString tagB = this->getBookInfos(b, {"tags"})["tags"].toString();
+            return m_sortOrderAsc ? (tagA.localeAwareCompare(tagB) < 0) : (tagA.localeAwareCompare(tagB) > 0);
+        });
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
